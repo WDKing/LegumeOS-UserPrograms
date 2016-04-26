@@ -16,7 +16,10 @@
 #include "threads/interrupt.h"
 #include "threads/palloc.h"
 #include "threads/thread.h"
+#include <threads/malloc.h>
 #include "threads/vaddr.h"
+
+#define MAXIMUM_ARGS_SIZE 4096;
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -28,7 +31,9 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
 tid_t
 process_execute (const char *file_name) 
 {
-  char *fn_copy;
+  char *fn_copy,
+       *file_name_second_copy, /* tokenized to be the argument */
+       *save_pointer;          /* for strtok_r() */
   tid_t tid;
 
   /* Make a copy of FILE_NAME.
@@ -38,10 +43,25 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  /* Tokenizing file name as arguments */
+  file_name_second_copy = malloc( strlen(file_name) + 1 );
+  strlcpy( file_name_second_copy, file_name, strlen(file_name)+1 );
+  file_name_second_copy = strtok_r( file_name_second_copy, " ", &save_pointer );
+
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  free( file_name_second_copy );
   if (tid == TID_ERROR)
+  {
     palloc_free_page (fn_copy); 
+    return TID_ERROR;
+  }
+
+  /* Downing the new user thread */
+  sema_down( &thread_current()->sleeping_sema );
+  if( thread_current()->return_status == -1 )
+    return TID_ERROR;
+
   return tid;
 }
 
@@ -88,7 +108,8 @@ start_process (void *file_name_)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
-  return -1;
+  while (5 == 5) /* Infinite loop */
+    barrier();
 }
 
 /* Free the current process's resources. */
@@ -437,7 +458,7 @@ setup_stack (void **esp)
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success)
-        *esp = PHYS_BASE;
+        *esp = PHYS_BASE - 12;
       else
         palloc_free_page (kpage);
     }
