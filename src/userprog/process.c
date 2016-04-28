@@ -21,6 +21,9 @@
 
 #define MAXIMUM_ARGS_SIZE 4096;
 
+/* Added method */
+static int push_args_on_stack(void **esp UNUSED, char **save_pointer UNUSED, char* tokn_args UNUSED);
+
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
 
@@ -43,13 +46,13 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
-  /* Tokenizing file name as arguments */
+  /* Tokenizing file name */
   file_name_second_copy = malloc( strlen(file_name) + 1 );
   strlcpy( file_name_second_copy, file_name, strlen(file_name)+1 );
   file_name_second_copy = strtok_r( file_name_second_copy, " ", &save_pointer );
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (file_name_second_copy, PRI_DEFAULT, start_process, fn_copy);
   free( file_name_second_copy );
   if (tid == TID_ERROR)
   {
@@ -73,6 +76,9 @@ start_process (void *file_name_)
   char *file_name = file_name_;
   struct intr_frame if_;
   bool success;
+  char *tokn_args;       /* Tokenized argument */
+  char *save_pointer;    /* for strtok_r() */
+  struct thread *current_t = thread_current();
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
@@ -81,10 +87,27 @@ start_process (void *file_name_)
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp);
 
-  /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
+  /* Tokenize file name as arguments */
+  tokn_args = strtok_r( file_name, " ", &save_pointer );
+  success = load( file_name, &if_.eip, &if_.esp );
+  
+  if (!success) /* load failed, quit. */ 
+  {
+    palloc_free_page (file_name);
+    current_t->return_status = -1; /* Return error */
+    sema_up( &current_t->sleeping_sema );
     thread_exit ();
+  }
+  else /* load succeeded. */
+  {
+    push_args_on_stack(&if_.esp, &save_pointer, tokn_args);//TODO - make method
+
+    /* filesys_open is defined in src/filesys/filesys.c */
+    current_t->thread_file = filesys_open( file_name );
+    file_deny_write( current_t->thread_file );
+    sema_up( &current_t->sleeping_sema );
+    palloc_free_page (file_name);
+  }
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -95,6 +118,7 @@ start_process (void *file_name_)
   asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
   NOT_REACHED ();
 }
+
 
 /* Waits for thread TID to die and returns its exit status.  If
    it was terminated by the kernel (i.e. killed due to an
@@ -483,4 +507,12 @@ install_page (void *upage, void *kpage, bool writable)
      address, then map our page there. */
   return (pagedir_get_page (t->pagedir, upage) == NULL
           && pagedir_set_page (t->pagedir, upage, kpage, writable));
+}
+
+
+/* TODO */
+static int
+push_args_on_stack( void **esp UNUSED, char **save_pointer UNUSED, char* tokn_args UNUSED )
+{
+  return 0;
 }
