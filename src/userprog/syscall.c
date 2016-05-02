@@ -4,6 +4,7 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "devices/shutdown.h"
+#include "threads/vaddr.h"
 
 /* User process's Program ID - default to int */
 typedef int pid_t;
@@ -11,6 +12,7 @@ typedef int pid_t;
 static void syscall_handler (struct intr_frame *);
 
 /* Added methods */
+void *check_address( const void * );
 static void     system_exit_user_prog ( int status );
 /*static pid_t    system_run_executable ( const char *cmd_line );
 static int      wait_till_process_exit ( pid_t pid );
@@ -19,10 +21,10 @@ static bool     system_deleted_file ( const char *file );
 static int      system_open_file ( const char *file );
 static int      file_size_bytes ( int fd );
 static int      file_bytes_read ( int fd, void *buffer, unsigned size );*/
-static int      file_bytes_write ( int fd, const void *buffer, unsigned size );
+/*static int      file_bytes_write ( int fd, const void *buffer, unsigned size );*/
 /*static void     seek_file_position ( int fd, unsigned position );
-static unsigned next_file_position ( int fd );
-static void     close_file ( int fd );*/
+static unsigned next_file_position ( int fd );*/
+static void     close_file ( int fd );
 
 void
 syscall_init (void) 
@@ -38,6 +40,10 @@ syscall_handler (struct intr_frame *f)
   /* now reduce the pointer to an integer constant */
   int which_system_call = *virt_addr_sp;
 
+  /* Checks for invalid user pointer */
+  check_address( virt_addr_sp );
+
+
   switch ( which_system_call )
   {
     case SYS_HALT:
@@ -47,6 +53,7 @@ syscall_handler (struct intr_frame *f)
     break;
 
     case SYS_EXIT:
+    check_address( virt_addr_sp + 1 );
     system_exit_user_prog( *(virt_addr_sp + 1) );
     break;
 
@@ -79,9 +86,9 @@ syscall_handler (struct intr_frame *f)
     break;
 
     case SYS_WRITE:
-    file_bytes_write( *(virt_addr_sp + 1), 
+    /*file_bytes_write( *(virt_addr_sp + 1), 
                       *(virt_addr_sp + 2), 
-                      *(virt_addr_sp + 3) );
+                      *(virt_addr_sp + 3) );*/
     break;
 
     case SYS_SEEK:
@@ -98,13 +105,44 @@ syscall_handler (struct intr_frame *f)
 
   }//End switch - which system call
 
+  return ;
+}
+
+
+/* Checks to make sure the given virtual address is in the 
+   user memory and not the kernel memory. */
+void  
+*check_address ( const void *virt_address )
+{
+  if( is_kernel_vaddr(virt_address) )
+  {
+    system_exit_user_prog( -1 );
+    return 0;
+  }
+
+  void *addr_pointer = pagedir_get_page( thread_current()->pagedir, virt_address );
+  if( addr_pointer == NULL )
+  {
+    system_exit_user_prog( -1 );
+    return 0;
+  }
 }
 
 
 /* Terminates the current user program. Returns a status to the kernel */
 static void 
-system_exit_user_prog ( int status UNUSED )
+system_exit_user_prog ( int status )
 {
+  struct thread *current_t = thread_current();
+  struct list_elem *list_parser;
+
+  /*while( !list_empty(&current_t->thread_file_list) )
+  {
+    list_parser = listbegin( &current_t->thread_file_list );
+    close_file( list_entry( list_parser, struct user_prog_file, file_list_elem )->fid );
+  }*/
+
+  current_t->return_status = status;
   thread_exit();
 }
 
@@ -178,20 +216,20 @@ file_bytes_read ( int fd UNUSED, void *buffer UNUSED, unsigned size UNUSED )
 /* Writes 'size' bytes from buffer into the open file with fd, 'fd'.
    Returns the number of bytes actually written (0 if no bytes were written) 
    fd 1 writes to the console. */
-static int 
+/*static int 
 file_bytes_write ( int fd UNUSED, const void *buffer UNUSED, unsigned size )
 {
-  if( fd == 0 ) /* write was called with input file descriptor */
-  {
+  if( fd == 0 )*/ /* write was called with input file descriptor */
+  /*{
     return -1;
   }
-  else if( fd == 1 ) /* write to console */
-  {
+  else if( fd == 1 )*/ /* write to console */
+  /*{
     putbuf( buffer, size );
     return size;
   }
   return -1;
-}
+}*/
 
 
 /* Changes the next byte to be read of written in open file with fd,  'fd' to 
