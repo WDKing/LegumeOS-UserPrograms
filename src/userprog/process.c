@@ -19,7 +19,10 @@
 #include <threads/malloc.h>
 #include "threads/vaddr.h"
 
-#define MAXIMUM_ARGS_SIZE 4096;
+#define MAXIMUM_ARGS_SIZE 4096
+
+/* Added method */
+static int push_args_on_stack(void **esp, char **save_pointer, char *tokn_args);
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -35,7 +38,8 @@ process_execute (const char *file_name)
        *file_name_second_copy, /* tokenized to be the argument */
        *save_pointer;          /* for strtok_r() */
   tid_t tid;
-
+  struct thread *user_t;       /* User thread */
+  
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
@@ -43,23 +47,24 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
-  /* Tokenizing file name as arguments */
+  /* Tokenizing file name */
   file_name_second_copy = malloc( strlen(file_name) + 1 );
-  strlcpy( file_name_second_copy, file_name, strlen(file_name)+1 );
-  file_name_second_copy = strtok_r( file_name_second_copy, " ", &save_pointer );
+  strlcpy( file_name_second_copy, file_name, PGSIZE );
+  file_name = strtok_r( file_name_second_copy, " ", &save_pointer );
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (fn_copy, PRI_DEFAULT, start_process, fn_copy);
   free( file_name_second_copy );
   if (tid == TID_ERROR)
   {
     palloc_free_page (fn_copy); 
     return TID_ERROR;
   }
+  user_t = find_thread_by_tid(tid);
 
   /* Downing the new user thread */
-  sema_down( &thread_current()->sleeping_sema );
-  if( thread_current()->return_status == -1 )
+  sema_down( &user_t->sleeping_sema );
+  if( user_t->return_status == -1 )
     return TID_ERROR;
 
   return tid;
@@ -73,18 +78,37 @@ start_process (void *file_name_)
   char *file_name = file_name_;
   struct intr_frame if_;
   bool success;
+  char *tokn_args;       /* Tokenized argument */
+  char *save_pointer;    /* for strtok_r() */
+  struct thread *current_t = thread_current();
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
 
-  /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
+  /* Tokenize file name */
+  tokn_args = strtok_r( file_name, " ", &save_pointer );
+  success = load( file_name, &if_.eip, &if_.esp );
+
+  if (!success) /* load failed, quit. */ 
+  {
+    palloc_free_page (file_name);
+    current_t->return_status = -1; /* Return error */
+    sema_up( &current_t->sleeping_sema );
     thread_exit ();
+  }
+  else /* load succeeded. */
+  {
+    push_args_on_stack(&if_.esp, &save_pointer, tokn_args);
+
+    /* filesys_open is defined in src/filesys/filesys.c */
+    current_t->thread_file_exe = filesys_open( file_name );
+    file_deny_write( current_t->thread_file_exe );
+    sema_up( &current_t->sleeping_sema );
+    palloc_free_page (file_name);
+  }
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -96,6 +120,7 @@ start_process (void *file_name_)
   NOT_REACHED ();
 }
 
+
 /* Waits for thread TID to die and returns its exit status.  If
    it was terminated by the kernel (i.e. killed due to an
    exception), returns -1.  If TID is invalid or if it was not a
@@ -106,10 +131,33 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid) 
 {
-  while (5 == 5) /* Infinite loop */
-    barrier();
+  struct thread *current_t,
+                *child_t;
+  int return_stat;
+  
+  current_t = thread_current();
+  child_t = find_thread_by_tid(child_tid);
+
+  if( child_t == NULL ||
+      child_t->thread_parent != current_t ||
+      child_t->wait_for_child )
+  {
+    return -1; /* Return Error */
+  }
+  else if( child_t->return_status != 0 ||
+           child_t->user_prog_exited == true )
+  {
+    return child_t->return_status;
+  }
+
+  sema_down( &child_t->sleeping_sema );
+  return_stat = child_t->return_status;
+  sema_up( &child_t->exiting_sema );
+  child_t->wait_for_child = true;
+
+  return return_stat;
 }
 
 /* Free the current process's resources. */
@@ -118,6 +166,16 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+  if( cur->thread_file_exe != NULL )
+    file_allow_write( cur->thread_file_exe );
+
+  while( !list_empty( &cur->sleeping_sema.waiters ) )
+    sema_up( &cur->sleeping_sema );
+
+  cur->user_prog_exited = true;
+  if( cur->thread_parent != NULL )
+    sema_down( &cur->exiting_sema );
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -484,3 +542,78 @@ install_page (void *upage, void *kpage, bool writable)
   return (pagedir_get_page (t->pagedir, upage) == NULL
           && pagedir_set_page (t->pagedir, upage, kpage, writable));
 }
+
+
+/* Pushes the user programs arguments onto the stack of kernel memory */
+static int
+push_args_on_stack( void **esp, char **save_pointer, char *tokn_args )
+{
+  int num_of_pushed_args = 0,
+      *int_stack_pointer,
+      argc;
+  char *arg_stack_pointer,
+       **first_arg_pointer;
+  void *stack_pointer;
+  stack_pointer = *esp; /* set kernel memory stack pointer */
+
+  do /* Push argument data */
+  {
+    /* Push kernel stack pointer */
+    size_t arg_length = strlen(tokn_args) + 1;
+    stack_pointer = (void *) ( ((char *) stack_pointer) - arg_length );
+    strlcpy( (char *) stack_pointer, tokn_args, arg_length );
+    argc++;
+
+    /* check if we're pushing to many args */
+    if( PHYS_BASE - stack_pointer > MAXIMUM_ARGS_SIZE )
+      return 0;
+
+    /* Tokenize next argument */
+    tokn_args = strtok_r( NULL, " ", save_pointer );
+
+  } while( tokn_args != NULL ); /* we have more arguments */
+  *arg_stack_pointer = (char *) stack_pointer;
+
+
+  /* Round stack pointer to the nearest multiple of 4 */
+  stack_pointer = (void *) (((intptr_t) stack_pointer) & 0xfffffffc );
+
+  /* Push the null sentinel to ensure argv[argc] is a null pointer */
+  stack_pointer = ( ((char **) stack_pointer) - 1 );
+  *( (char *) stack_pointer ) = 0;
+
+
+  while( num_of_pushed_args < argc ) /* Push the pointers to the arguments */
+  {
+    /* while arg_stack_pointer doesn't point to the end of an argument */
+    while( *(arg_stack_pointer - 1) != '\0' )
+      arg_stack_pointer++;
+
+    stack_pointer = ((char **) stack_pointer) - 1;
+    *((char **) stack_pointer) = arg_stack_pointer;
+    num_of_pushed_args++;
+    arg_stack_pointer++;
+  }
+
+
+  /* Push argv */
+  **first_arg_pointer = (char **) stack_pointer;
+  stack_pointer = ((char **) stack_pointer) - 1;
+  *((char ***) stack_pointer) = **first_arg_pointer;
+
+  /* Push argc */
+  *int_stack_pointer = (int *) stack_pointer;
+  int_stack_pointer--;
+  *int_stack_pointer = argc;
+  stack_pointer = (void *) int_stack_pointer;
+
+  /* Push null return address */
+  stack_pointer = ((void **) stack_pointer) - 1;
+  *((void **) stack_pointer) = 0;
+
+  *esp = stack_pointer; /* update argument location */
+  return 1;
+}
+
+
+
