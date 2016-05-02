@@ -99,9 +99,14 @@ struct thread
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
     int return_status;                  /* Threads return status */
-    struct file *thread_file;           /* currently opened file */
-    struct semaphore sleeping_sema;     /* Semaphore used to put threads down */
+    struct file *thread_file_exe;       /* File with the thread executable inside */
+    struct list thread_file_list;       /* List of open files */
+    struct semaphore sleeping_sema;     /* Semaphore used to make threads wait */
+    struct semaphore exiting_sema;      /* Semaphore used to make threads exit */
     struct list open_files;             /* list of the threads open files */
+    bool wait_for_child;                /* if parent thread needs to wait */
+    bool user_prog_exited;              /* if user program called exit */
+    struct thread *thread_parent;       /* current threads' parent thread */
 #endif
 
     /* Owned by thread.c. */
@@ -143,5 +148,17 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+/* File Identifier */
+/*typedef int fid_t;*/
+
+/* User program file wrapper */
+/*struct user_prog_file
+{
+  fid_t fid;                       */ /* file identifier - unique */
+  /*struct file *actual_user_file;   */ /* Pointer to the actual user file */
+  /*struct list_elem file_list_elem; */ /* To be put in the threads file list */
+/*}*/
+
 
 #endif /* threads/thread.h */
